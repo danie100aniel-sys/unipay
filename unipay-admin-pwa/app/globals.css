@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+@theme {
+  --color-tactical-bg: #07080B;
+  --color-tactical-card: #12141C;
+  --color-tactical-amber: #FFB000;
+  --color-tactical-border: rgba(255, 176, 0, 0.25);
+}
+
+body {
+  background-color: var(--color-tactical-bg);
+  color: var(--color-tactical-amber);
+}
