@@ -14,14 +14,14 @@ async function createOrder(site, { product_id, amount_usd, currency, customer_re
   const { rows } = await db.query(
     `INSERT INTO orders (
       order_id,
-      site_id, 
-      product_id, 
-      amount_usd, 
-      amount_paid_usd, 
-      remaining_balance_usd, 
-      currency, 
-      customer_ref, 
-      metadata, 
+      site_id,
+      product_id,
+      amount_usd,
+      amount_paid_usd,
+      remaining_balance_usd,
+      currency,
+      customer_ref,
+      metadata,
       expires_at
     )
     VALUES ($1, $2, $3, $4, 0.00, $4, $5, $6, $7::jsonb, now() + ($8 || ' minutes')::interval)
@@ -108,7 +108,7 @@ async function recordPartialPayment(orderId, paymentAmountUsd, paymentType, code
 
     // 4. Update the order record atomically
     const updateRes = await client.query(
-      `UPDATE orders 
+      `UPDATE orders
        SET amount_paid_usd = $1,
            remaining_balance_usd = $2,
            status = $3,
