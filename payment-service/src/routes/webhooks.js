@@ -21,7 +21,6 @@ const { lookupPayment } = require('../services/lnbitsLightning');
 
 const router = express.Router();
 
-router.use(express.raw({ type: '*/*' }));
 
 // --------------------------------------------------
 // WEBHOOK LOGGING AND SIGNATURE VERIFICATION
@@ -196,7 +195,7 @@ const timingSafeEqual = (a, b) => {
 // --------------------------------------------------
 
 function mount(path, provider, verifyFn) {
-  router.post(path, async (req, res, next) => {
+  router.post(path, express.raw({ type: '*/*' }), async (req, res, next) => {
     try {
       if (!Buffer.isBuffer(req.body)) {
         const error = new Error('Webhook raw body unavailable');
