@@ -199,6 +199,8 @@ export function AuthModal({ onAuthenticated }: { onAuthenticated: (adminData: Ad
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="••••••••••••"
+              autoComplete="current-password"
+              required
               className="w-full bg-[#07080B] border border-[#FFB000]/30 p-2.5 text-xs text-[#FFB000] focus:outline-none focus:border-[#FFB000]"
             />
           </div>

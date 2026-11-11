@@ -14,7 +14,7 @@ import { OrdersTab } from '@/app/components/dashboard/tabs/OrdersTab';
 import { QueueTab } from '@/app/components/dashboard/tabs/QueueTab';
 import { CommsTab } from '@/app/components/dashboard/tabs/CommsTab';
 import { useAutoLock } from '@/app/hooks/useAutoLock';
-import { getAdminApiBaseUrl } from './lib/adminApi';
+import { adminFetch, getAdminApiBaseUrl } from './lib/adminApi';
 import { SystemTab } from '@/app/components/dashboard/tabs/SystemTab';
 
 const GLOBAL_ASSET_CONFIG = {
@@ -46,7 +46,10 @@ function DashboardMetricsGrid() {
 }
 
 export default function DashboardPage() {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => typeof window !== 'undefined' && Boolean(localStorage.getItem('unipay_token')));
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isRestoringSession, setIsRestoringSession] = useState(true);
+  const [sessionRestoreError, setSessionRestoreError] = useState(false);
+
   interface AdminIdentity { admin_id?: string; username?: string; role?: string }
   interface LiveActivity { type: string; description: string; timestamp: string }
   interface NotificationItem { id: number; type: string; text: string; time: string; unread: boolean }
@@ -70,6 +73,58 @@ export default function DashboardPage() {
   const handleClearUnread = () => {
     setNotifications(notifications.map(n => ({ ...n, unread: false })));
   };
+
+  // Restore the authenticated admin identity from the backend on page reload.
+  useEffect(() => {
+    let cancelled = false;
+
+    const restoreSession = async () => {
+      const token = localStorage.getItem('unipay_token');
+
+      if (!token) {
+        setIsAuthenticated(false);
+        setAdmin(null);
+        setIsRestoringSession(false);
+        return;
+      }
+
+      try {
+        const data = await adminFetch('/profile');
+        const restoredAdmin = data.admin as AdminIdentity | undefined;
+
+        if (!restoredAdmin || !restoredAdmin.role || !restoredAdmin.admin_id) {
+          throw new Error('The server returned an incomplete admin profile.');
+        }
+
+        if (!cancelled) {
+          setAdmin(restoredAdmin);
+          setIsAuthenticated(true);
+          setSessionRestoreError(false);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Admin session restoration failed:', error);
+
+          if (localStorage.getItem('unipay_token')) {
+            // Keep the token if this was a network or server error.
+            setSessionRestoreError(true);
+          } else {
+            // The API helper removed an invalid/expired token.
+            setIsAuthenticated(false);
+            setAdmin(null);
+          }
+        }
+      } finally {
+        if (!cancelled) setIsRestoringSession(false);
+      }
+    };
+
+    restoreSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useAutoLock(() => {
     setIsAuthenticated(false);
@@ -159,6 +214,29 @@ export default function DashboardPage() {
     setIsAuthenticated(false);
     setAdmin(null);
   };
+
+  if (isRestoringSession) {
+    return (
+      <main className="min-h-screen bg-[#07080B] text-[#FFB000] flex items-center justify-center font-mono">
+        RESTORING ADMIN SESSION...
+      </main>
+    );
+  }
+
+  if (sessionRestoreError) {
+    return (
+      <main className="min-h-screen bg-[#07080B] text-[#FFB000] flex flex-col items-center justify-center gap-4 font-mono">
+        <p>UNABLE TO RESTORE ADMIN SESSION</p>
+        <p className="text-sm text-[#FFB000]/70">Check your connection and try again.</p>
+        <button
+          onClick={() => window.location.reload()}
+          className="border border-[#FFB000] px-5 py-2 hover:bg-[#FFB000]/10"
+        >
+          RETRY
+        </button>
+      </main>
+    );
+  }
 
   if (!isAuthenticated) {
     return <AuthModal onAuthenticated={handleAuthenticated} />;

@@ -1,5 +1,19 @@
 'use strict';
-try { require('dotenv').config(); } catch { /* dotenv optional in prod envs */ }
+try {
+  const path = require('path');
+  const dotenv = require('dotenv');
+  // Existing process environment (e.g. Render) takes priority.
+  // More specific local files are loaded before shared defaults.
+  const candidates = [
+    path.resolve(__dirname, '../.env.local'),
+    path.resolve(__dirname, '../.env'),
+    path.resolve(__dirname, '../../.env.local'),
+  ];
+
+  candidates.forEach((envPath) => {
+    dotenv.config({ path: envPath, override: false });
+  });
+} catch { /* dotenv optional in prod envs */ }
 
 const parseCsvList = (value, fallback = []) => {
   if (!value) return fallback;

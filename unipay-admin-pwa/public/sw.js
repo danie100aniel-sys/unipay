@@ -1,11 +1,16 @@
 // UniPay PWA Service Worker for Push Notifications
 
 self.addEventListener('push', function (event) {
-  let data = { title: 'UniPay Alert', body: 'New operational event recorded.', tag: 'unipay-alert' };
-  
+  let data = {
+    title: 'UniPay Alert',
+    body: 'New administrative notification.',
+    tag: 'unipay-alert',
+    url: '/admin/'
+  };
+
   if (event.data) {
     try {
-      data = event.data.json();
+      data = { ...data, ...event.data.json() };
     } catch {
       data.body = event.data.text();
     }
@@ -13,10 +18,10 @@ self.addEventListener('push', function (event) {
 
   const options = {
     body: data.body,
-    icon: '/icon.png', // Fallback or app icon if available
+    icon: '/icon.png',
     badge: '/badge.png',
     tag: data.tag || 'unipay-alert',
-    vibrate: [200, 100, 200],
+    data: { url: data.url || '/admin/' }
   };
 
   event.waitUntil(
@@ -26,18 +31,35 @@ self.addEventListener('push', function (event) {
 
 self.addEventListener('notificationclick', function (event) {
   event.notification.close();
-  event.waitUntil(
-    clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (clientList) {
-      if (clientList.length > 0) {
-        let client = clientList[0];
-        for (let i = 0; i < clientList.length; i++) {
-          if (clientList[i].focused) {
-            client = clientList[i];
-          }
-        }
+
+  event.waitUntil((async function () {
+    let targetUrl = '/admin/';
+
+    try {
+      const requestedUrl = new URL(
+        event.notification.data?.url || '/admin/',
+        self.location.origin
+      );
+
+      if (requestedUrl.origin === self.location.origin) {
+        targetUrl = requestedUrl.href;
+      }
+    } catch {
+      targetUrl = '/admin/';
+    }
+
+    const clientList = await clients.matchAll({
+      type: 'window',
+      includeUncontrolled: true
+    });
+
+    for (const client of clientList) {
+      if ('navigate' in client) {
+        await client.navigate(targetUrl);
         return client.focus();
       }
-      return clients.openWindow('/');
-    })
-  );
+    }
+
+    return clients.openWindow(targetUrl);
+  })());
 });

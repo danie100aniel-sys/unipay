@@ -56,3 +56,4 @@ payment-service/backups/
 payment-service/**/*.bak*
 payment-service/**/*.backup
 payment-service/**/*.before-*
+.neon

@@ -11,8 +11,8 @@ interface SystemTabProps {
 interface Giftcard { giftcard_id: string; brand: string; face_value_usd: number | string; image_url?: string; receipt_path?: string; order_status: string }
 interface Voucher { voucher_id: string; rail: string; amount_usd?: number | string; expected_amount?: number | string; status?: string }
 interface WebhookLog { id: string; provider: string; signature_valid: boolean; order_id?: string; created_at: string }
-interface Site { id: string; domain: string; is_active: boolean; created_at: string }
-interface MerchantKey { id: string; key_prefix: string; environment: string; created_at: string }
+interface Site { site_id: string; display_name: string; site_url: string; active: boolean; created_at: string }
+interface MerchantKey { site_id: string; display_name: string; active: boolean; created_at: string }
 interface WidgetSession { id: string; session_id: string; client_ip: string; updated_at: string }
 interface SystemApiResponse extends Record<string, unknown> { success?: boolean; logs?: WebhookLog[]; giftcards?: Giftcard[]; vouchers?: Voucher[]; sites?: Site[]; keys?: MerchantKey[]; sessions?: WidgetSession[]; users?: AdminUser[]; code?: string; pin?: string; admin?: AdminUser }
 
@@ -185,12 +185,22 @@ function VoucherRow({ vc }: { vc: Voucher }) {
   );
 }
 
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = '='.repeat((4 - base64String.length % 4) % 4);
+  const base64 = (base64String + padding)
+    .replace(/-/g, '+')
+    .replace(/_/g, '/');
+
+  const raw = window.atob(base64);
+  return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+}
+
 export function SystemTab({ role }: SystemTabProps) {
   const isSuperAdmin = role === 'superadmin';
 
   const availableTabs = isSuperAdmin
     ? ['users', 'sites', 'keys', 'sessions', 'webhooks', 'assets', 'push']
-    : ['sites', 'keys', 'sessions', 'webhooks', 'assets'];
+    : ['sites', 'keys', 'sessions', 'webhooks', 'assets', 'push'];
 
   const [activeSubTab, setActiveSubTab] = useState<string>(availableTabs[0]);
 
@@ -199,6 +209,11 @@ export function SystemTab({ role }: SystemTabProps) {
   const [vouchers, setVouchers] = useState<Voucher[]>([]);
   const [sites, setSites] = useState<Site[]>([]);
   const [keys, setKeys] = useState<MerchantKey[]>([]);
+  const [newSiteId, setNewSiteId] = useState('');
+  const [newSiteName, setNewSiteName] = useState('');
+  const [newSiteUrl, setNewSiteUrl] = useState('');
+  const [siteBusy, setSiteBusy] = useState(false);
+  const [siteMsg, setSiteMsg] = useState({ text: '', error: false });
   const [sessions, setSessions] = useState<WidgetSession[]>([]);
 
   // Users state management for 'users' subtab
@@ -217,6 +232,9 @@ export function SystemTab({ role }: SystemTabProps) {
 
   const [pushTitle, setPushTitle] = useState('');
   const [pushBody, setPushBody] = useState('');
+  const [pushStatus, setPushStatus] = useState('');
+  const [pushBusy, setPushBusy] = useState(false);
+
 
   const fetchSystemData = useCallback(async () => {
     try {
@@ -254,6 +272,40 @@ export function SystemTab({ role }: SystemTabProps) {
     const timer = setTimeout(() => { void fetchSystemData(); }, 0);
     return () => clearTimeout(timer);
   }, [fetchSystemData]);
+
+  const handleCreateSite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isSuperAdmin || siteBusy) return;
+
+    setSiteBusy(true);
+    setSiteMsg({ text: '', error: false });
+
+    try {
+      const res = await adminFetch<SystemApiResponse>('/sites', {
+        method: 'POST',
+        body: JSON.stringify({
+          site_id: newSiteId.trim(),
+          display_name: newSiteName.trim(),
+          site_url: newSiteUrl.trim()
+        })
+      });
+
+      if (!res.success) throw new Error('Website registration failed');
+
+      setSiteMsg({ text: 'Website registered successfully.', error: false });
+      setNewSiteId('');
+      setNewSiteName('');
+      setNewSiteUrl('');
+      await fetchSystemData();
+    } catch (err: unknown) {
+      setSiteMsg({
+        text: err instanceof Error ? err.message : 'Website registration failed.',
+        error: true
+      });
+    } finally {
+      setSiteBusy(false);
+    }
+  };
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -316,12 +368,58 @@ export function SystemTab({ role }: SystemTabProps) {
     }
   };
 
+  const handleEnablePush = async () => {
+    if (pushBusy) return;
+
+    setPushBusy(true);
+    setPushStatus('');
+
+    try {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+        throw new Error('This browser does not support push notifications.');
+      }
+
+      const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+      if (!publicKey) {
+        throw new Error('Public VAPID key is missing from the frontend configuration.');
+      }
+
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        throw new Error('Notification permission was not granted.');
+      }
+
+      const registration = await navigator.serviceWorker.ready;
+      let subscription = await registration.pushManager.getSubscription();
+
+      if (!subscription) {
+        subscription = await registration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
+        });
+      }
+
+      await adminFetch('/push/subscribe', {
+        method: 'POST',
+        body: JSON.stringify(subscription.toJSON()),
+      });
+
+      setPushStatus('Notifications enabled on this device.');
+    } catch (err) {
+      setPushStatus(
+        err instanceof Error ? err.message : 'Could not enable notifications.'
+      );
+    } finally {
+      setPushBusy(false);
+    }
+  };
+
   const handleSendPush = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!isSuperAdmin) return;
     if (!pushTitle.trim() || !pushBody.trim()) return;
     try {
-      const res = await adminFetch('/admin/push/send', {
+      const res = await adminFetch('/push/send', {
         method: 'POST',
         body: JSON.stringify({ title: pushTitle, body: pushBody })
       });
@@ -330,8 +428,8 @@ export function SystemTab({ role }: SystemTabProps) {
         setPushTitle('');
         setPushBody('');
       }
-    } catch {
-      alert('Error triggering push broadcast');
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Error triggering push broadcast');
     }
   };
 
@@ -454,7 +552,53 @@ export function SystemTab({ role }: SystemTabProps) {
       )}
 
       {activeSubTab === 'sites' && (
-        <div className="bg-[#12141C]/90 border border-[#FFB000]/30 p-4 space-y-3">
+        <div className="space-y-4">
+          {isSuperAdmin && (
+            <form onSubmit={handleCreateSite} className="bg-[#12141C]/90 border border-[#FFB000]/30 p-4 space-y-3">
+              <h3 className="text-xs font-bold tracking-widest uppercase flex items-center gap-2">
+                <Globe className="w-4 h-4" /> Register Your Website
+              </h3>
+              <input
+                value={newSiteId}
+                onChange={(e) => setNewSiteId(e.target.value)}
+                placeholder="SITE ID (e.g. my_store)"
+                pattern="[a-zA-Z0-9_-]{2,80}"
+                maxLength={80}
+                required
+                className="w-full bg-black border border-[#FFB000]/30 p-2 text-xs text-white outline-none"
+              />
+              <input
+                value={newSiteName}
+                onChange={(e) => setNewSiteName(e.target.value)}
+                placeholder="DISPLAY NAME"
+                maxLength={120}
+                required
+                className="w-full bg-black border border-[#FFB000]/30 p-2 text-xs text-white outline-none"
+              />
+              <input
+                type="url"
+                value={newSiteUrl}
+                onChange={(e) => setNewSiteUrl(e.target.value)}
+                placeholder="https://yourwebsite.com"
+                required
+                className="w-full bg-black border border-[#FFB000]/30 p-2 text-xs text-white outline-none"
+              />
+              <button
+                type="submit"
+                disabled={siteBusy}
+                className="bg-[#FFB000] text-black font-bold px-4 py-2 text-[10px] uppercase disabled:opacity-50"
+              >
+                {siteBusy ? 'Registering...' : 'Register Website'}
+              </button>
+              {siteMsg.text && (
+                <p className={`text-xs ${siteMsg.error ? 'text-red-400' : 'text-emerald-400'}`}>
+                  {siteMsg.text}
+                </p>
+              )}
+            </form>
+          )}
+
+          <div className="bg-[#12141C]/90 border border-[#FFB000]/30 p-4 space-y-3">
           <h3 className="text-xs font-bold tracking-widest uppercase flex items-center gap-2"><Globe className="w-4 h-4" /> Registered Sites</h3>
           <table className="w-full text-left text-xs">
             <thead>
@@ -466,14 +610,19 @@ export function SystemTab({ role }: SystemTabProps) {
             </thead>
             <tbody>
               {sites.map(site => (
-                <tr key={site.id} className="border-b border-[#FFB000]/10">
-                  <td className="p-2 font-mono text-[11px]">{site.domain}</td>
-                  <td className="p-2">{site.is_active ? 'Active' : 'Inactive'}</td>
+                <tr key={site.site_id} className="border-b border-[#FFB000]/10">
+                  <td className="p-2">
+                    <div className="font-mono text-[11px]">{site.display_name}</div>
+                    <div className="opacity-50 text-[10px]">{site.site_url}</div>
+                    <div className="opacity-40 text-[9px]">{site.site_id}</div>
+                  </td>
+                  <td className="p-2">{site.active ? 'Active' : 'Inactive'}</td>
                   <td className="p-2 opacity-60">{new Date(site.created_at).toLocaleDateString()}</td>
                 </tr>
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -483,16 +632,19 @@ export function SystemTab({ role }: SystemTabProps) {
           <table className="w-full text-left text-xs">
             <thead>
               <tr className="border-b border-[#FFB000]/20 text-[#FFB000]/70 text-[10px]">
-                <th className="p-2">Key Prefix</th>
-                <th className="p-2">Environment</th>
+                <th className="p-2">Website</th>
+                <th className="p-2">Status</th>
                 <th className="p-2">Created</th>
               </tr>
             </thead>
             <tbody>
               {keys.map(k => (
-                <tr key={k.id} className="border-b border-[#FFB000]/10">
-                  <td className="p-2 font-mono text-[11px]">{k.key_prefix}...</td>
-                  <td className="p-2 uppercase">{k.environment}</td>
+                <tr key={k.site_id} className="border-b border-[#FFB000]/10">
+                  <td className="p-2">
+                    <div>{k.display_name}</div>
+                    <div className="opacity-50 font-mono text-[10px]">{k.site_id}</div>
+                  </td>
+                  <td className="p-2">{k.active ? 'Active' : 'Inactive'}</td>
                   <td className="p-2 opacity-60">{new Date(k.created_at).toLocaleDateString()}</td>
                 </tr>
               ))}
@@ -551,16 +703,35 @@ export function SystemTab({ role }: SystemTabProps) {
         </div>
       )}
 
-      {activeSubTab === 'push' && isSuperAdmin && (
+      {activeSubTab === 'push' && (
         <div className="bg-[#12141C]/90 border border-[#FFB000]/30 p-4 space-y-4">
-          <h3 className="text-xs font-bold tracking-widest uppercase flex items-center gap-2"><Bell className="w-4 h-4" /> Broadcast Push Alerts</h3>
-          <form onSubmit={handleSendPush} className="space-y-3 pt-2">
-            <input type="text" placeholder="ALERT TITLE" value={pushTitle} onChange={(e) => setPushTitle(e.target.value)} className="w-full bg-black border border-[#FFB000]/30 p-2 text-xs focus:border-[#FFB000] outline-none" required />
-            <textarea placeholder="ALERT PAYLOAD / BODY" rows={3} value={pushBody} onChange={(e) => setPushBody(e.target.value)} className="w-full bg-black border border-[#FFB000]/30 p-2 text-xs focus:border-[#FFB000] outline-none resize-none" required />
-            <button type="submit" className="bg-[#FFB000] text-black font-bold px-4 py-2 text-[10px] uppercase cursor-pointer flex items-center gap-2">
-              <Send className="w-3 h-3" /> Broadcast to Admins
+          <h3 className="text-xs font-bold tracking-widest uppercase flex items-center gap-2"><Bell className="w-4 h-4" /> Admin Push Notifications</h3>
+          <div className="space-y-2">
+            <button
+              type="button"
+              onClick={handleEnablePush}
+              disabled={pushBusy}
+              className="border border-[#FFB000]/50 text-[#FFB000] px-4 py-2 text-[10px] uppercase disabled:opacity-50"
+            >
+              {pushBusy ? 'Enabling...' : 'Enable Notifications on This Device'}
             </button>
-          </form>
+            {pushStatus && (
+              <p role="status" className="text-xs text-gray-300">{pushStatus}</p>
+            )}
+          </div>
+          {isSuperAdmin ? (
+            <form onSubmit={handleSendPush} className="space-y-3 pt-2">
+              <input type="text" placeholder="ALERT TITLE" value={pushTitle} onChange={(e) => setPushTitle(e.target.value)} className="w-full bg-black border border-[#FFB000]/30 p-2 text-xs focus:border-[#FFB000] outline-none" required />
+              <textarea placeholder="ALERT PAYLOAD / BODY" rows={3} value={pushBody} onChange={(e) => setPushBody(e.target.value)} className="w-full bg-black border border-[#FFB000]/30 p-2 text-xs focus:border-[#FFB000] outline-none resize-none" required />
+              <button type="submit" className="bg-[#FFB000] text-black font-bold px-4 py-2 text-[10px] uppercase cursor-pointer flex items-center gap-2">
+                <Send className="w-3 h-3" /> Broadcast to Admins
+              </button>
+            </form>
+          ) : (
+            <p className="text-xs text-gray-400 pt-2">
+              You can enable notifications on this device. Global broadcasts are managed by a superadmin.
+            </p>
+          )}
         </div>
       )}
 

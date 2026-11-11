@@ -453,6 +453,7 @@ router.get('/profile', (req, res) => {
   res.json({
     success: true,
     admin: {
+      admin_id: req.admin.admin_id,
       username: req.admin.username,
       role: req.admin.role,
       lock_timeout_minutes: req.admin.lock_timeout_minutes
@@ -580,11 +581,84 @@ router.post('/review/:orderId/resolve', async (req, res, next) => {
 router.post('/push/subscribe', async (req, res, next) => {
   try {
     const subscription = req.body;
+
+    if (
+      !subscription ||
+      typeof subscription.endpoint !== 'string' ||
+      !subscription.keys ||
+      typeof subscription.keys.p256dh !== 'string' ||
+      typeof subscription.keys.auth !== 'string'
+    ) {
+      const err = new Error('A valid browser push subscription is required');
+      err.status = 400;
+      return next(err);
+    }
+
+    // Replace an existing registration for this browser endpoint.
     await db.query(
-      `INSERT INTO admin_push_subscriptions (admin_id, subscription) VALUES ($1::uuid, $2)`,
+      `DELETE FROM admin_push_subscriptions
+       WHERE subscription->>'endpoint' = $1`,
+      [subscription.endpoint]
+    );
+
+    await db.query(
+      `INSERT INTO admin_push_subscriptions (admin_id, subscription)
+       VALUES ($1::uuid, $2::jsonb)`,
       [req.admin.admin_id, JSON.stringify(subscription)]
     );
-    res.json({ success: true, message: 'Push subscription registered successfully' });
+
+    res.json({
+      success: true,
+      message: 'Push subscription registered successfully'
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+router.post('/push/send', requireSuperAdmin, async (req, res, next) => {
+  try {
+    const { title, body } = req.body || {};
+
+    if (
+      typeof title !== 'string' ||
+      typeof body !== 'string' ||
+      !title.trim() ||
+      !body.trim() ||
+      title.length > 120 ||
+      body.length > 1000
+    ) {
+      const err = new Error('A title (max 120 characters) and body (max 1000 characters) are required');
+      err.status = 400;
+      return next(err);
+    }
+
+    if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
+      const err = new Error('Push notification service is not configured');
+      err.status = 503;
+      return next(err);
+    }
+
+    const result = await sendAdminNotification(
+      title.trim(),
+      body.trim(),
+      '/admin/',
+      'all'
+    );
+
+    if (result.error) {
+      const err = new Error('Push notification dispatch failed');
+      err.status = 502;
+      return next(err);
+    }
+
+    res.json({
+      success: true,
+      message: 'Push notification dispatch completed',
+      sent: result.sent,
+      failed: result.failed,
+      removed: result.removed
+    });
   } catch (e) {
     next(e);
   }
@@ -765,9 +839,91 @@ router.get('/vouchers/:id/reveal', async (req, res, next) => {
 });
 
 
+
+// ==========================================
+// PRIVATE WEBSITE REGISTRY
+// ==========================================
+
+router.post('/sites', requireSuperAdmin, async (req, res, next) => {
+  const site_id = String(req.body.site_id || '').trim();
+  const display_name = String(req.body.display_name || '').trim();
+  const site_url = String(req.body.site_url || '').trim();
+
+  if (!site_id || !display_name || !site_url) {
+    const err = new Error('Site ID, display name, and website URL are required');
+    err.status = 400;
+    return next(err);
+  }
+
+  if (!/^[a-zA-Z0-9_-]{2,80}$/.test(site_id)) {
+    const err = new Error('Site ID must be 2–80 characters and contain only letters, numbers, hyphens, or underscores');
+    err.status = 400;
+    return next(err);
+  }
+
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(site_url);
+    if (!['http:', 'https:'].includes(parsedUrl.protocol) ||
+        parsedUrl.username || parsedUrl.password) {
+      throw new Error('Invalid website URL');
+    }
+  } catch {
+    const err = new Error('Enter a valid HTTP or HTTPS website URL');
+    err.status = 400;
+    return next(err);
+  }
+
+  try {
+    const client = await db.connect();
+
+    try {
+      await client.query('BEGIN');
+
+      const { rows } = await client.query(
+        `INSERT INTO managed_sites (site_id, display_name, site_url)
+         VALUES ($1, $2, $3)
+         RETURNING site_id, display_name, site_url, active, created_at`,
+        [site_id, display_name, parsedUrl.toString()]
+      );
+
+      await client.query(
+        `INSERT INTO admin_activities
+          (admin_id, username, action_type, description, metadata)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [
+          req.admin.admin_id,
+          req.admin.username,
+          'SITE_REGISTERED',
+          `Registered website '${site_id}'.`,
+          JSON.stringify({ site_id, display_name, site_url: parsedUrl.toString() })
+        ]
+      );
+
+      await client.query('COMMIT');
+      res.status(201).json({ success: true, site: rows[0] });
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    if (e.code === '23505') {
+      const err = new Error('A website with this Site ID is already registered');
+      err.status = 409;
+      return next(err);
+    }
+    next(e);
+  }
+});
+
 router.get('/sites', async (req, res, next) => {
   try {
-    const { rows } = await db.query(`SELECT site_id, display_name as domain, active as is_active, created_at FROM merchant_keys ORDER BY created_at DESC`);
+    const { rows } = await db.query(
+      `SELECT site_id, display_name, site_url, active, created_at
+       FROM managed_sites ORDER BY created_at DESC`
+    );
     res.json({ success: true, sites: rows });
   } catch (e) {
     next(e);
@@ -776,7 +932,10 @@ router.get('/sites', async (req, res, next) => {
 
 router.get('/merchant-keys', async (req, res, next) => {
   try {
-    const { rows } = await db.query(`SELECT * FROM merchant_keys ORDER BY created_at DESC`);
+    const { rows } = await db.query(
+      `SELECT site_id, display_name, active, created_at
+       FROM merchant_keys ORDER BY created_at DESC`
+    );
     res.json({ success: true, keys: rows });
   } catch (e) {
     next(e);
